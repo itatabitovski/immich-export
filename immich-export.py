@@ -3,6 +3,7 @@
 # requires-python = ">=3.10"
 # dependencies = [
 #     "requests>=2.31",  # HTTP client for the Immich API
+#     "pyyaml>=6.0",     # YAML frontmatter for the .md summary files
 # ]
 # ///
 # Run directly: ./immich-export.py --url ... --api-key ...
@@ -27,6 +28,7 @@ import sys
 from pathlib import Path
 
 import requests
+import yaml
 
 
 def api(base: str, key: str, path: str) -> dict:
@@ -160,16 +162,51 @@ def write_xmp(path: Path, lat: float | None, lon: float | None, description: str
     path.write_text(xmp, encoding="utf-8")
 
 
+def yaml_quote(s: str) -> str:
+    """Serialize a scalar to a safe single-line YAML value (no document markers)."""
+    return yaml.safe_dump(s, default_flow_style=True, allow_unicode=True,
+                          width=10**6, explicit_start=False, explicit_end=False
+                          ).strip().removesuffix("...").strip()
+
+
 def write_md(path: Path, a: dict) -> None:
+    """Markdown summary with YAML frontmatter: machine-parseable fields + human-readable body."""
     exif = a.get("exifInfo") or {}
     place = ", ".join(x for x in (exif.get("city"), exif.get("state"), exif.get("country")) if x)
-    lines = [
+    lat, lon = exif.get("latitude"), exif.get("longitude")
+    people = [p.get("name") for p in (a.get("people") or []) if p.get("name")]
+
+    # YAML frontmatter (Obsidian-style: --- delimited block at the top)
+    fm = ["---",
+          f"file: {yaml_quote(a.get('originalFileName', a['id']))}",
+          f"asset_id: {a['id']}",
+          f"type: {a.get('type', 'IMAGE')}"]
+    if exif.get("description"):
+        fm.append(f"description: {yaml_quote(exif['description'])}")
+    if exif.get("dateTimeOriginal"):
+        fm.append(f"date: {exif['dateTimeOriginal']}")
+    if lat is not None and lon is not None:
+        fm.append(f"location: {{lat: {lat}, lon: {lon}}}")
+        if exif.get("city"):
+            fm.append(f"city: {yaml_quote(exif['city'])}")
+        if exif.get("state"):
+            fm.append(f"state: {yaml_quote(exif['state'])}")
+        if exif.get("country"):
+            fm.append(f"country: {yaml_quote(exif['country'])}")
+    if exif.get("make") or exif.get("model"):
+        fm.append(f"camera: {yaml_quote(str(exif.get('make') or '').strip() + ' ' + str(exif.get('model') or '')).strip('\" ')}")
+    if people:
+        fm.append(f"people: [{', '.join(yaml_quote(p) for p in people)}]")
+    fm.append("---")
+
+    # human-readable markdown body
+    lines = fm + [
+        "",
         f"# {a.get('originalFileName', a['id'])}",
         "",
         f"- Description: {exif.get('description') or '—'}",
         f"- Date: {exif.get('dateTimeOriginal') or '—'}",
     ]
-    lat, lon = exif.get("latitude"), exif.get("longitude")
     if lat is not None and lon is not None:
         lines.append(f"- Location: {lat:.6f}, {lon:.6f}" + (f" ({place})" if place else ""))
         lines.append(f"- Map: https://www.openstreetmap.org/?mlat={lat}&mlon={lon}#map=17/{lat}/{lon}")
@@ -177,34 +214,24 @@ def write_md(path: Path, a: dict) -> None:
         lines.append("- Location: —")
     if exif.get("model"):
         lines.append(f"- Camera: {str(exif.get('make') or '').strip()} {exif['model']}".strip())
-    people = [p.get("name") for p in (a.get("people") or []) if p.get("name")]
     if people:
         lines.append(f"- People: {', '.join(people)}")
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
-def sanitize(name: str) -> str:
-    """Make an album name safe as a directory name."""
-    return re.sub(r'[<>:"/\\|?*]', "_", name).strip(" .") or "unnamed"
-
-
-def export_album(base: str, key: str, album_id: str, out: Path, limit: int = 0) -> int:
-    """Export one album's assets (images + videos) into `out`; returns count."""
-    out.mkdir(parents=True, exist_ok=True)
-    assets = search_assets(base, key, {"albumIds": [album_id]})
-    if limit:
-        assets = assets[:limit]
-    n = 0
-    for a in assets:
-        # fetch full asset (listings are slim: no exifInfo, sometimes no type)
-        full = api(base, key, f"/api/assets/{a['id']}")
-        name = full["originalFileName"]
-        download_original(base, key, a["id"], out / name)
-        exif = full.get("exifInfo") or {}
-        lat, lon = exif.get("latitude"), exif.get("longitude")
-        faces_xml = ""
+def export_asset(base: str, key: str, asset_id: str, out: Path,
+                 want_image: bool = True, want_xmp: bool = True, want_md: bool = True) -> bool:
+    """Export one asset (original + .xmp + .md) honoring the selection flags."""
+    full = api(base, key, f"/api/assets/{asset_id}")
+    name = full["originalFileName"]
+    if want_image:
+        download_original(base, key, asset_id, out / name)
+    exif = full.get("exifInfo") or {}
+    lat, lon = exif.get("latitude"), exif.get("longitude")
+    faces_xml = ""
+    if want_xmp:
         try:
-            faces = api(base, key, f"/api/faces?id={a['id']}")
+            faces = api(base, key, f"/api/faces?id={asset_id}")
             faces_xml = face_regions(faces, exif.get("exifImageWidth") or 0,
                                      exif.get("exifImageHeight") or 0)
         except requests.HTTPError as e:
@@ -216,9 +243,28 @@ def export_album(base: str, key: str, album_id: str, out: Path, limit: int = 0) 
         write_xmp(out / f"{name}.xmp", lat, lon,
                   exif.get("description") or "",
                   exif.get("dateTimeOriginal") or "", faces_xml)
+    if want_md:
         write_md(out / f"{name}.md", full)
+    return True
+
+
+def sanitize(name: str) -> str:
+    """Make an album name safe as a directory name."""
+    return re.sub(r'[<>:"/\\|?*]', "_", name).strip(" .") or "unnamed"
+
+
+def export_album(base: str, key: str, album_id: str, out: Path, limit: int = 0,
+                 want_image: bool = True, want_xmp: bool = True, want_md: bool = True) -> int:
+    """Export one album's assets (images + videos) into `out`; returns count."""
+    out.mkdir(parents=True, exist_ok=True)
+    assets = search_assets(base, key, {"albumIds": [album_id]})
+    if limit:
+        assets = assets[:limit]
+    n = 0
+    for a in assets:
+        export_asset(base, key, a["id"], out, want_image, want_xmp, want_md)
         n += 1
-        print(f"[{n}] {name}")
+        print(f"[{n}] {a.get('originalFileName', a['id'])}")
     return n
 
 
@@ -231,7 +277,15 @@ def main() -> int:
     p.add_argument("--album-regex", help="export every album whose name matches this regex")
     p.add_argument("--limit", type=int, default=0, help="max assets (0 = all)")
     p.add_argument("--out", default="immich-export")
+    p.add_argument("--no-image-download", action="store_true",
+                   help="skip downloading the original files (metadata/sidecars only)")
+    p.add_argument("--no-xmp-sidecar", action="store_true",
+                   help="skip writing .xmp sidecars (GPS/description/faces)")
+    p.add_argument("--no-summary-file", action="store_true",
+                   help="skip writing .md summary files")
     args = p.parse_args()
+    if args.no_image_download and args.no_xmp_sidecar and args.no_summary_file:
+        p.error("nothing to export: all three outputs disabled")
 
     out = Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
@@ -245,13 +299,17 @@ def main() -> int:
             return 1
         for al in matches:
             print(f"Album: {al['albumName']} ({al.get('assetCount', '?')} assets)")
-            export_album(args.url, args.api_key, al["id"], out / sanitize(al["albumName"]), args.limit)
+            export_album(args.url, args.api_key, al["id"], out / sanitize(al["albumName"]),
+                         args.limit, not args.no_image_download, not args.no_xmp_sidecar,
+                         not args.no_summary_file)
         return 0
 
     if args.asset_id:
         assets = [{"id": args.asset_id}]
     elif args.album_id:
-        n = export_album(args.url, args.api_key, args.album_id, out, args.limit)
+        n = export_album(args.url, args.api_key, args.album_id, out, args.limit,
+                         not args.no_image_download, not args.no_xmp_sidecar,
+                         not args.no_summary_file)
         print(f"Done: {n} assets -> {out.resolve()}")
         return 0
     else:
@@ -261,30 +319,11 @@ def main() -> int:
 
     n = 0
     for a in assets:
-        # fetch full asset (listings are slim: no exifInfo, sometimes no type)
-        full = api(args.url, args.api_key, f"/api/assets/{a['id']}")
-        name = full["originalFileName"]
-        dest = out / name
-        download_original(args.url, args.api_key, a["id"], dest)
-        exif = full.get("exifInfo") or {}
-        lat, lon = exif.get("latitude"), exif.get("longitude")
-        faces_xml = ""
-        try:
-            faces = api(args.url, args.api_key, f"/api/faces?id={a['id']}")
-            faces_xml = face_regions(faces, exif.get("exifImageWidth") or 0,
-                                     exif.get("exifImageHeight") or 0)
-        except requests.HTTPError as e:
-            if e.response is not None and e.response.status_code == 403:
-                print("  ! no face.read permission on API key — skipping XMP face regions "
-                      "(edit the key's permissions in Immich to include it)")
-            else:
-                raise
-        write_xmp(out / f"{name}.xmp", lat, lon,
-                  exif.get("description") or "",
-                  exif.get("dateTimeOriginal") or "", faces_xml)
-        write_md(out / f"{name}.md", full)
+        export_asset(args.url, args.api_key, a["id"], out,
+                     not args.no_image_download, not args.no_xmp_sidecar,
+                     not args.no_summary_file)
         n += 1
-        print(f"[{n}] {name}")
+        print(f"[{n}] {a.get('originalFileName', a['id'])}")
 
     print(f"Done: {n} assets -> {out.resolve()}")
     return 0
