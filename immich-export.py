@@ -4,6 +4,7 @@
 # dependencies = [
 #     "requests>=2.31",  # HTTP client for the Immich API
 #     "pyyaml>=6.0",     # YAML frontmatter for the .md summary files
+#     "jinja2>=3.1",     # XMP sidecar template (templates/xmp.j2)
 # ]
 # ///
 # Run directly: ./immich-export.py --url ... --api-key ...
@@ -29,6 +30,7 @@ from pathlib import Path
 
 import requests
 import yaml
+from jinja2 import Environment
 
 
 def api(base: str, key: str, path: str) -> dict:
@@ -76,21 +78,16 @@ def to_dms(value: float, ref: str) -> str:
     return f"{d},{m},{s:.4f}{ref}"
 
 
-def xml_escape(s: str) -> str:
-    return (s.replace("&", "&amp;").replace("<", "&lt;")
-            .replace(">", "&gt;").replace('"', "&quot;"))
-
-
-def face_regions(faces: list, img_w: int, img_h: int) -> str:
-    """Build MWG-RS + IPTC ImageRegion face-region XML from Immich face data.
+def prepare_faces(faces: list, img_w: int, img_h: int) -> list[dict]:
+    """Normalize Immich face records to relative (0..1) rectangles.
 
     faces: entries from GET /api/faces (with person.name and boundingBoxX1..Y2,
-    in pixels of imageWidth x imageHeight — normalized to 0..1 here).
+    in pixels of imageWidth x imageHeight). Returns [{x, y, w, h, name}] with
+    coordinates pre-formatted as 6-decimal strings, ready for templates/xmp.j2.
+    Unnamed faces and records without usable dimensions are skipped.
     """
-    if not faces:
-        return ""
-    mwg_items, iptc_items = [], []
-    for i, f in enumerate(faces):
+    out = []
+    for f in faces:
         name = (f.get("person") or {}).get("name") or ""
         if not name:
             continue  # skip unnamed/unrecognized faces
@@ -101,65 +98,44 @@ def face_regions(faces: list, img_w: int, img_h: int) -> str:
         x2 = f["boundingBoxX2"] / fw
         y1 = f["boundingBoxY1"] / fh
         y2 = f["boundingBoxY2"] / fh
-        # MWG-RS (Lightroom/digiKam lineage)
-        mwg_items.append(
-            '     <mwg-rs:Area x="{x1:.6f}" y="{y1:.6f}" w="{w:.6f}" h="{h:.6f}"'
-            ' unit="normalized"/>\n'
-            '     <mwg-rs:Name>{name}</mwg-rs:Name>'.format(
-                x1=x1, y1=y1, w=x2 - x1, h=y2 - y1, name=xml_escape(name))
-        )
-        # IPTC ImageRegion (current official standard)
-        iptc_items.append(
-            "     <Iptc4xmpExt:RegionBoundary x=\"{x1:.6f}\" y=\"{y1:.6f}\" w=\"{w:.6f}\" h=\"{h:.6f}\"/>"
-            .format(x1=x1, y1=y1, w=x2 - x1, h=y2 - y1) +
-            (f"\n     <Iptc4xmpExt:PersonName>{xml_escape(name)}</Iptc4xmpExt:PersonName>"
-             if name else "")
-        )
-    if not mwg_items:
-        return ""
-    return (
-        '  <rdf:Description rdf:about=""\n'
-        '    xmlns:mwg-rs="http://www.metadataworkinggroup.com/schemas/regions/"\n'
-        '    xmlns:Iptc4xmpExt="http://iptc.org/std/Iptc4xmpExt/2008-02-29/">\n'
-        '   <mwg-rs:Regions>\n'
-        '    <mwg-rs:RegionList>\n'
-        + "\n".join(
-            f"     <rdf:Description>\n{m}\n     </rdf:Description>" for m in mwg_items
-        ) +
-        "\n    </mwg-rs:RegionList>\n   </mwg-rs:Regions>\n"
-        "   <Iptc4xmpExt:ImageRegion>\n"
-        + "\n".join(f"    <rdf:Description>\n{i}\n    </rdf:Description>" for i in iptc_items) +
-        "\n   </Iptc4xmpExt:ImageRegion>\n"
-        "  </rdf:Description>\n"
-    )
+        out.append({"x": f"{x1:.6f}", "y": f"{y1:.6f}",
+                    "w": f"{x2 - x1:.6f}", "h": f"{y2 - y1:.6f}", "name": name})
+    return out
+
+
+_XMP_TEMPLATE = Path(__file__).resolve().parent / "templates" / "xmp.j2"
+_xmp_env = Environment(autoescape=True, trim_blocks=True, lstrip_blocks=True)
 
 
 def write_xmp(path: Path, lat: float | None, lon: float | None, description: str = "",
-              date_taken: str = "", faces_xml: str = "") -> None:
+              date_taken: str = "", faces: list[dict] | None = None,
+              img_w: int = 0, img_h: int = 0) -> None:
+    """Render the XMP sidecar from templates/xmp.j2.
+
+    The Jinja environment runs with autoescape=True, so every interpolated
+    value (description, person names) is XML-escaped — no manual escaping.
+    """
     if lat is not None and lon is not None:
         lat_ref = "N" if lat >= 0 else "S"
         lon_ref = "E" if lon >= 0 else "W"
-        gps_attrs = (f'    xmlns:exif="http://ns.adobe.com/exif/1.0/"\n'
-                     f'    exif:GPSLatitude="{to_dms(lat, lat_ref)}"\n'
-                     f'    exif:GPSLongitude="{to_dms(lon, lon_ref)}"\n'
-                     f'    exif:GPSLatitudeRef="{lat_ref}"\n'
-                     f'    exif:GPSLongitudeRef="{lon_ref}">\n')
+        lat_dms, lon_dms = to_dms(lat, lat_ref), to_dms(lon, lon_ref)
+        has_gps = True
     else:
-        gps_attrs = ">\n"
-    desc = xml_escape(description)
-    xmp = f"""<?xml version='1.0' encoding='utf-8'?>
-<x:xmpmeta xmlns:x="adobe:ns:meta/">
- <rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#">
-  <rdf:Description rdf:about=""
-    xmlns:dc="http://purl.org/dc/elements/1.1/"
-    xmlns:xmp="http://ns.adobe.com/xap/1.0/"
-{gps_attrs}   <dc:description><rdf:Alt><rdf:li xml:lang="x-default">{desc}</rdf:li></rdf:Alt></dc:description>
-   <xmp:CreateDate>{date_taken}</xmp:CreateDate>
-  </rdf:Description>
-{faces_xml} </rdf:RDF>
-</x:xmpmeta>
-"""
-    path.write_text(xmp, encoding="utf-8")
+        lat_ref = lon_ref = lat_dms = lon_dms = ""
+        has_gps = False
+    xmp = _xmp_env.from_string(_XMP_TEMPLATE.read_text(encoding="utf-8")).render(
+        has_gps=has_gps,
+        lat_dms=lat_dms,
+        lon_dms=lon_dms,
+        lat_ref=lat_ref,
+        lon_ref=lon_ref,
+        description=description,
+        date_taken=date_taken,
+        faces=faces or [],
+        img_w=img_w,
+        img_h=img_h,
+    )
+    path.write_text(xmp.rstrip("\n") + "\n", encoding="utf-8")
 
 
 def yaml_quote(s: str) -> str:
@@ -228,12 +204,12 @@ def export_asset(base: str, key: str, asset_id: str, out: Path,
         download_original(base, key, asset_id, out / name)
     exif = full.get("exifInfo") or {}
     lat, lon = exif.get("latitude"), exif.get("longitude")
-    faces_xml = ""
+    faces = []
     if want_xmp:
         try:
-            faces = api(base, key, f"/api/faces?id={asset_id}")
-            faces_xml = face_regions(faces, exif.get("exifImageWidth") or 0,
-                                     exif.get("exifImageHeight") or 0)
+            raw_faces = list(api(base, key, f"/api/faces?id={asset_id}"))
+            faces = prepare_faces(raw_faces, exif.get("exifImageWidth") or 0,
+                                  exif.get("exifImageHeight") or 0)
         except requests.HTTPError as e:
             if e.response is not None and e.response.status_code == 403:
                 print("  ! no face.read permission on API key — skipping XMP face regions "
@@ -242,7 +218,8 @@ def export_asset(base: str, key: str, asset_id: str, out: Path,
                 raise
         write_xmp(out / f"{name}.xmp", lat, lon,
                   exif.get("description") or "",
-                  exif.get("dateTimeOriginal") or "", faces_xml)
+                  exif.get("dateTimeOriginal") or "", faces,
+                  exif.get("exifImageWidth") or 0, exif.get("exifImageHeight") or 0)
     if want_md:
         write_md(out / f"{name}.md", full)
     return True

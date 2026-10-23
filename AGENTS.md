@@ -2,9 +2,11 @@
 
 ## Overview
 
-Single-file Python CLI tool: `immich-export.py` exports assets from an Immich server
-(original file + `.xmp` sidecar with GPS/description/faces + `.md` summary). There is
-no package, no test suite, no CI, and no git history — everything lives in the one script.
+Single-script Python CLI tool: `immich-export.py` exports assets from an Immich
+server (original file + `.xmp` sidecar with GPS/description/faces + `.md`
+summary), plus `templates/xmp.j2`, the Jinja2 template the XMP sidecar is
+rendered from (it must sit next to the script). There is no package, no test
+suite, and no CI — everything lives in the script and that one template.
 
 ## Running
 
@@ -36,8 +38,9 @@ python immich-export.py --url ... --api-key ... --limit 1
 3. `GET /api/assets/{id}/original` streamed to disk in 1 MiB chunks (300 s timeout;
    JSON calls use 60 s).
 4. `GET /api/faces?id={assetId}` for face regions (best-effort, see gotchas).
-5. Write sidecars: `write_xmp()` (GPS in DMS, dc:description, xmp:CreateDate,
-   face regions in **both** MWG-RS and IPTC ImageRegion forms) and `write_md()`
+5. Write sidecars: `write_xmp()` renders `templates/xmp.j2` (GPS in DMS,
+   dc:description, xmp:CreateDate, people as dc:subject keywords, face regions
+   in **both** MWG-RS and IPTC ImageRegion forms) and `write_md()`
    (description, date, location + OpenStreetMap link, camera, people).
 
 ## Gotchas
@@ -60,9 +63,22 @@ python immich-export.py --url ... --api-key ... --limit 1
   (immich-export.py:189) and inline in `main()` (immich-export.py:262) for the
   `--asset-id` / no-filter paths. Any behavioral change must be applied to both
   (or unify them).
-- **XMP is hand-built from f-strings** with a manual `xml_escape()`; no XML
-  library is used anywhere. All user text (descriptions, person names) must go
-  through `xml_escape()` before insertion.
+- **XMP is rendered from `templates/xmp.j2`** with a Jinja2 environment in
+  `autoescape=True` mode — every `{{ }}` interpolation is XML-escaped
+  automatically. There is no manual `xml_escape()` anymore; do not add one and
+  do not use `|safe` in the template. The template is loaded from
+  `Path(__file__).parent/templates/xmp.j2`, so the file must ship with the
+  script.
+- **Face regions need a Type tag in both dialects** or consumers ignore them:
+  `<mwg-rs:Type>Face</mwg-rs:Type>` in MWG-RS, and `Iptc4xmpExt:rCtype` (a
+  CV-term structure, value `http://cv.iptc.org/newscodes/imageregiontype/human`)
+  in IPTC ImageRegion. The IPTC form must use the `rb*` child elements
+  (`rbShape`/`rbUnit`/`rbX`/`rbY`/`rbW`/`rbH`) inside `RegionBoundary` — not
+  x/y/w/h attributes — and the person name goes in `Iptc4xmpExt:Name`
+  (`Iptc4xmpExt:PersonName` is not a real tag). The MWG block also carries
+  `mwg-rs:AppliedToDimensions` (stDim, pixels) when dimensions are known:
+  Immich's own sidecar re-import requires it to convert the normalized region
+  coordinates back to pixel boxes.
 - **Face bounding boxes arrive in pixels** of each face record's
   `imageWidth`/`imageHeight` (falling back to the asset's
   `exifImageWidth`/`exifImageHeight`) and are normalized to 0..1 in
@@ -73,8 +89,9 @@ python immich-export.py --url ... --api-key ... --limit 1
 
 ## Conventions
 
-- Stdlib + `requests` only; dependency is declared exclusively in the PEP 723
-  block at the top of the script — keep that block in sync if deps change.
+- Stdlib + `requests` + `pyyaml` + `jinja2` only; dependencies are declared
+  exclusively in the PEP 723 block at the top of the script — keep that block
+  in sync if deps change.
 - Target Python >= 3.10 (uses `float | None` union syntax).
 - Functions take `(base, key, ...)` for API accessors; `base` is `rstrip('/')`-ed
   at each call site, so callers may pass a URL with or without trailing slash.

@@ -1,0 +1,97 @@
+{#-
+  XMP sidecar template for immich-export.
+
+  Rendered with Jinja2 in autoescape mode: every {{ }} below is XML-escaped,
+  so descriptions and person names are safe to interpolate as-is.
+
+  Context:
+    has_gps, lat_dms, lon_dms, lat_ref, lon_ref  -- GPS block (exif: DMS strings)
+    description, date_taken                      -- plain strings
+    faces   -- list of {x, y, w, h, name} with x/y/w/h pre-formatted relative
+              (0..1) coordinate strings
+    img_w, img_h -- pixel dimensions for mwg-rs:AppliedToDimensions (0 = unknown)
+
+  Face regions are written in both dialects:
+    - MWG-RS (Lightroom/digiKam lineage; what Immich re-imports via exiftool:
+      it needs AppliedToDimensions + RegionList, each region Name + Type Face)
+    - IPTC ImageRegion (Iptc4xmpExt, current official standard): RegionBoundary
+      struct with rb* child elements + rCtype CV-term "human"
+      (http://cv.iptc.org/newscodes/imageregiontype/human)
+-#}
+<?xml version="1.0" encoding="utf-8"?>
+<x:xmpmeta xmlns:x="adobe:ns:meta/" x:xmptk="immich-export">
+ <rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#">
+  <rdf:Description rdf:about=""
+    xmlns:dc="http://purl.org/dc/elements/1.1/"
+    xmlns:xmp="http://ns.adobe.com/xap/1.0/"
+{% if has_gps %}
+    xmlns:exif="http://ns.adobe.com/exif/1.0/"
+    exif:GPSLatitude="{{ lat_dms }}"
+    exif:GPSLongitude="{{ lon_dms }}"
+    exif:GPSLatitudeRef="{{ lat_ref }}"
+    exif:GPSLongitudeRef="{{ lon_ref }}"
+{% endif %}
+   >
+   <dc:description><rdf:Alt><rdf:li xml:lang="x-default">{{ description }}</rdf:li></rdf:Alt></dc:description>
+   <xmp:CreateDate>{{ date_taken }}</xmp:CreateDate>
+{% if faces %}
+   <dc:subject>
+    <rdf:Bag>
+{% for name in faces | map(attribute='name') | unique %}
+     <rdf:li>{{ name }}</rdf:li>
+{% endfor %}
+    </rdf:Bag>
+   </dc:subject>
+{% endif %}
+  </rdf:Description>
+{% if faces %}
+  <rdf:Description rdf:about=""
+    xmlns:mwg-rs="http://www.metadataworkinggroup.com/schemas/regions/"
+    xmlns:stDim="http://ns.adobe.com/xap/1.0/sType/Dimensions#"
+    xmlns:Iptc4xmpExt="http://iptc.org/std/Iptc4xmpExt/2008-02-29/">
+   <mwg-rs:Regions rdf:parseType="Resource">
+{% if img_w and img_h %}
+    <mwg-rs:AppliedToDimensions rdf:parseType="Resource">
+     <stDim:w>{{ img_w }}</stDim:w>
+     <stDim:h>{{ img_h }}</stDim:h>
+     <stDim:unit>pixel</stDim:unit>
+    </mwg-rs:AppliedToDimensions>
+{% endif %}
+    <mwg-rs:RegionList>
+     <rdf:Bag>
+{% for f in faces %}
+      <rdf:li rdf:parseType="Resource">
+       <mwg-rs:Area x="{{ f.x }}" y="{{ f.y }}" w="{{ f.w }}" h="{{ f.h }}" unit="normalized"/>
+       <mwg-rs:Type>Face</mwg-rs:Type>
+       <mwg-rs:Name>{{ f.name }}</mwg-rs:Name>
+      </rdf:li>
+{% endfor %}
+     </rdf:Bag>
+    </mwg-rs:RegionList>
+   </mwg-rs:Regions>
+   <Iptc4xmpExt:ImageRegion>
+    <rdf:Bag>
+{% for f in faces %}
+     <rdf:li rdf:parseType="Resource">
+      <Iptc4xmpExt:RegionBoundary rdf:parseType="Resource">
+       <Iptc4xmpExt:rbShape>rectangle</Iptc4xmpExt:rbShape>
+       <Iptc4xmpExt:rbUnit>relative</Iptc4xmpExt:rbUnit>
+       <Iptc4xmpExt:rbX>{{ f.x }}</Iptc4xmpExt:rbX>
+       <Iptc4xmpExt:rbY>{{ f.y }}</Iptc4xmpExt:rbY>
+       <Iptc4xmpExt:rbW>{{ f.w }}</Iptc4xmpExt:rbW>
+       <Iptc4xmpExt:rbH>{{ f.h }}</Iptc4xmpExt:rbH>
+      </Iptc4xmpExt:RegionBoundary>
+      <Iptc4xmpExt:rCtype rdf:parseType="Resource">
+       <Iptc4xmpExt:CvId>http://cv.iptc.org/newscodes/imageregiontype/</Iptc4xmpExt:CvId>
+       <Iptc4xmpExt:CvTermId>http://cv.iptc.org/newscodes/imageregiontype/human</Iptc4xmpExt:CvTermId>
+       <Iptc4xmpExt:CvTermName><rdf:Alt><rdf:li xml:lang="x-default">human</rdf:li></rdf:Alt></Iptc4xmpExt:CvTermName>
+      </Iptc4xmpExt:rCtype>
+      <Iptc4xmpExt:Name><rdf:Alt><rdf:li xml:lang="x-default">{{ f.name }}</rdf:li></rdf:Alt></Iptc4xmpExt:Name>
+     </rdf:li>
+{% endfor %}
+    </rdf:Bag>
+   </Iptc4xmpExt:ImageRegion>
+  </rdf:Description>
+{% endif %}
+ </rdf:RDF>
+</x:xmpmeta>
