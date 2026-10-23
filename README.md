@@ -13,15 +13,16 @@ regions), and a readable `.md` summary for each asset.
 | File | Contents |
 |---|---|
 | `photo.jpg` | The original, unmodified file |
-| `photo.jpg.xmp` | GPS coordinates (EXIF), description (dc:description), date taken, face regions (MWG-RS + IPTC ImageRegion — understood by Lightroom, digiKam, etc.) |
+| `photo.jpg.xmp` | GPS coordinates (EXIF), description (dc:description), date taken, people as keywords (dc:subject), face regions (MWG-RS with `Type=Face` + `AppliedToDimensions` — re-importable by Immich — and IPTC ImageRegion with an `rCtype` CV-term; understood by Lightroom, digiKam, etc.) |
 | `photo.jpg.md` | Human-readable summary: description, date, location with an OpenStreetMap link, camera, people |
 
 ## Requirements
 
 - [uv](https://docs.astral.sh/uv/) — recommended; the script is self-contained
   (`uv` reads its inline dependency manifest and sets up an ephemeral venv
-  automatically on first run)
-- Or plain Python >= 3.10 with `requests` installed
+  automatically on first run); keep `templates/xmp.j2` next to the script —
+  the XMP sidecar is rendered from it
+- Or plain Python >= 3.10 with `requests`, `pyyaml` and `jinja2` installed
 
 You'll also need an **Immich API key**: Immich web UI → *Settings → API Keys*.
 Required key permissions:
