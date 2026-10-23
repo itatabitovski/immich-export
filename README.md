@@ -67,3 +67,11 @@ chmod +x immich-export.py
 | `--album-regex` | | Export every album whose name matches this regex |
 | `--limit` | `0` | Max assets (`0` = all; per album in `--album-regex` mode) |
 | `--out` | `immich-export/` | Output directory |
+| `--no-image-download` | off | Skip downloading the original files (metadata/sidecars only) |
+| `--no-xmp-sidecar` | off | Skip writing `.xmp` sidecars (GPS/description/faces) |
+| `--no-summary-file` | off | Skip writing `.md` summary files |
+
+The `--no-*` flags combine; at least one of the three outputs must stay
+enabled (the script errors out otherwise). Typical use: metadata-only export
+with `--no-image-download`, or just the readable summaries with
+`--no-image-download --no-xmp-sidecar`.
